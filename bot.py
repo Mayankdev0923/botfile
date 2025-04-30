@@ -25,7 +25,7 @@ alpha_api_key = 'S4WZ2N6CVAS82RJG'
 
 
 # List of authorized user IDs (add your Telegram user ID here)
-AUTHORIZED_USERS = [6151799236]  # Replace with your actual Telegram user ID
+AUTHORIZED_USERS = [1974773719]  # Replace with your actual Telegram user ID
 
 # === Manual RSI Calculation ===
 def calculate_rsi_manually(prices, window=14):
