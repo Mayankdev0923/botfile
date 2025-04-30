@@ -18,8 +18,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # === Telegram Setup ===
-bot_token = '7377183131:AAE4IUkuUC3XstE8iBJytu85lH5YtcfwHb4'
-chat_id = '6151799236'
+bot_token = '8089007262:AAFgApsN7gHtzmLmfz8BAsjIUrgAbTAobKg'
+chat_id = '1974773719'
 bot = Bot(token=bot_token)
 alpha_api_key = 'S4WZ2N6CVAS82RJG'
 
