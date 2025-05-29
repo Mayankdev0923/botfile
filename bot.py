@@ -49,17 +49,27 @@ class NSEScraper:
         self._init_session()
     
     def _init_session(self):
-        """Initialize session by visiting NSE homepage first"""
-        try:
-            response = self.session.get(self.base_url, timeout=10)
-            logger.info("NSE session initialized successfully")
-            
-            # Get cookies from initial request
-            cookies = response.cookies
-            logger.info(f"Received {len(cookies)} cookies from NSE")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize NSE session: {str(e)}")
+    """Initialize session by visiting NSE homepage to get cookies"""
+    try:
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/"
+        })
+
+        homepage_url = "https://www.nseindia.com"
+        response = self.session.get(homepage_url, timeout=10)
+        
+        # Ensure cookies are set
+        if response.status_code == 200 and response.cookies:
+            logger.info("NSE session initialized successfully with cookies")
+            logger.info(f"Received {len(response.cookies)} cookies: {response.cookies}")
+        else:
+            logger.warning("NSE session initialized, but no cookies received")
+
+    except Exception as e:
+        logger.error(f"Failed to initialize NSE session: {str(e)}")
+
     
     def get_nifty_data(self, index_type="50"):
         """Scrape NIFTY data from NSE website"""
