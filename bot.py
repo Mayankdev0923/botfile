@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 
 # === Bot Configuration ===
 bot_token = '7663540460:AAFAfqA3Ur7zNUiRJ5qDWXmjIuTtcE491Gc'
-chat_id = '6151799236'
+chat_id = ['6151799236','1974773719']
 bot = Bot(token=bot_token)
 
 # List of authorized user IDs
-AUTHORIZED_USERS = [6151799236]  # Add more user IDs as needed
+AUTHORIZED_USERS = [6151799236, 1974773719]  # Add more user IDs as needed
 
 # === NSE Website Scraper ===
 class NSEScraper:
@@ -127,8 +127,8 @@ class NSEScraper:
                 'change': float(data.get('variation', 0)),
                 'percent_change': float(data.get('percentChange', 0)),
                 'open': float(data.get('open', 0)),
-                'high': float(data.get('dayHigh', 0)),
-                'low': float(data.get('dayLow', 0)),
+                'high': float(data.get('high', 0)),
+                'low': float(data.get('low', 0)),
                 'previous_close': float(data.get('previousClose', 0)),
                 'timestamp': data.get('timeVal', ''),
                 'market_status': 'Open' if data.get('last', 0) > 0 else 'Closed'
