@@ -13,6 +13,11 @@ import logging
 import nest_asyncio
 import re
 from urllib.parse import urljoin
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+import shutil
 
 nest_asyncio.apply()
 
@@ -49,30 +54,46 @@ class NSEScraper:
         self._init_session()
     
     def _init_session(self):
-        """Initialize session by visiting NSE homepage to get cookies"""
+        """Initialize session by visiting NSE homepage using Selenium"""
         try:
-            proxies = {
-                'http': '103.167.32.93:50100'
-            }
-            
-            self.session.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.nseindia.com/"
-            })
-    
-            homepage_url = "https://www.nseindia.com"
-            response = self.session.get(homepage_url, proxies=proxies, timeout=10)
-            
-            # Ensure cookies are set
-            if response.status_code == 200 and response.cookies:
-                logger.info("NSE session initialized successfully with cookies")
-                logger.info(f"Received {len(response.cookies)} cookies: {response.cookies}")
+            logger.info("Attempting Selenium-based session init to bypass CDN block")
+
+            # Setup headless Chrome
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_argument("--window-size=1920,1080")
+
+            # Check chromedriver availability
+            chromedriver_path = shutil.which("chromedriver")
+            if not chromedriver_path:
+                raise FileNotFoundError("chromedriver not found in PATH")
+
+            driver = webdriver.Chrome(service=Service(chromedriver_path), options=chrome_options)
+
+            # Open NSE homepage
+            driver.get("https://www.nseindia.com")
+            time.sleep(5)  # Wait for cookies and JS to load
+
+            selenium_cookies = driver.get_cookies()
+            logger.info(f"Selenium got {len(selenium_cookies)} cookies")
+
+            # Transfer cookies to requests session
+            for cookie in selenium_cookies:
+                self.session.cookies.set(cookie['name'], cookie['value'])
+
+            driver.quit()
+
+            # Verify cookies
+            if self.session.cookies:
+                logger.info("Successfully initialized session with Selenium cookies")
             else:
-                logger.warning("NSE session initialized, but no cookies received")
-    
+                logger.warning("Selenium ran, but no cookies set in session")
+
         except Exception as e:
-            logger.error(f"Failed to initialize NSE session: {str(e)}")
+            logger.error(f"Selenium session init failed: {str(e)}")
 
     
     def get_nifty_data(self, index_type="50"):
