@@ -51,6 +51,10 @@ class NSEScraper:
     def _init_session(self):
         """Initialize session by visiting NSE homepage to get cookies"""
         try:
+            proxies = {
+                'http': '103.167.32.93:50100'
+            }
+            
             self.session.headers.update({
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                 "Accept-Language": "en-US,en;q=0.9",
@@ -58,7 +62,7 @@ class NSEScraper:
             })
     
             homepage_url = "https://www.nseindia.com"
-            response = self.session.get(homepage_url, timeout=10)
+            response = self.session.get(homepage_url, proxies=proxies, timeout=10)
             
             # Ensure cookies are set
             if response.status_code == 200 and response.cookies:
