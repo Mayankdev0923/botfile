@@ -97,61 +97,44 @@ class NSEScraper:
 
     
     def get_nifty_data(self, index_type="50"):
-        """Scrape NIFTY data from NSE website"""
+        """Fetch NIFTY data using Selenium"""
         try:
-            if index_type == "50":
-                # NIFTY 50 data endpoint
-                url = f"{self.base_url}/api/allIndices"
-            else:
-                # For NIFTY 100, we'll use the broad market indices endpoint
-                url = f"{self.base_url}/api/allIndices"
-            
-            logger.info(f"Fetching NIFTY {index_type} data from: {url}")
-            
-            # Make request with retry mechanism
-            for attempt in range(3):
-                try:
-                    response = self.session.get(url, timeout=15)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        
-                        # Find NIFTY data in response
-                        nifty_data = None
-                        target_name = "NIFTY 50" if index_type == "50" else "NIFTY 100"
-                        
-                        if 'data' in data:
-                            for item in data['data']:
-                                if item.get('index', '').upper() == target_name:
-                                    nifty_data = item
-                                    break
-                        
-                        if nifty_data:
-                            return self._parse_nifty_data(nifty_data, index_type)
-                        else:
-                            logger.warning(f"NIFTY {index_type} data not found in API response")
-                    
-                    elif response.status_code == 403:
-                        logger.warning("Access forbidden, reinitializing session...")
-                        self._init_session()
-                        time.sleep(2)
-                        continue
-                    
-                    else:
-                        logger.warning(f"HTTP {response.status_code} received from NSE")
-                
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"Request failed (attempt {attempt + 1}): {str(e)}")
-                    if attempt < 2:
-                        time.sleep(3)
-                        continue
-            
-            # Fallback to alternative scraping method
-            return self._scrape_nifty_alternative(index_type)
-            
-        except Exception as e:
-            logger.error(f"Error fetching NIFTY {index_type} data: {str(e)}")
+            logger.info(f"Selenium fetching NIFTY {index_type} data")
+    
+            # Setup headless Chrome
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_argument("--window-size=1920,1080")
+    
+            driver = webdriver.Chrome(service=Service(shutil.which("chromedriver")), options=chrome_options)
+    
+            # Open API endpoint directly in browser (may return raw JSON or get blocked)
+            api_url = f"https://www.nseindia.com/api/allIndices"
+            driver.get(api_url)
+    
+            time.sleep(5)
+    
+            # Try to parse JSON from page content
+            page_source = driver.find_element(By.TAG_NAME, "pre").text  # JSON response shown in <pre>
+            data = json.loads(page_source)
+            driver.quit()
+    
+            # Parse the JSON data
+            target_name = "NIFTY 50" if index_type == "50" else "NIFTY 100"
+            for item in data.get("data", []):
+                if item.get("index", "").upper() == target_name:
+                    return self._parse_nifty_data(item, index_type)
+    
+            logger.warning(f"{target_name} data not found")
             return None
+    
+        except Exception as e:
+            logger.error(f"Selenium API fetch failed: {str(e)}")
+            return None
+
     
     def _parse_nifty_data(self, data, index_type):
         """Parse NIFTY data from NSE API response"""
