@@ -1,15 +1,18 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import ta
+import requests
+import json
+from datetime import datetime, timedelta
+import time
+from bs4 import BeautifulSoup
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 import asyncio
-import time
 import logging
 import nest_asyncio
-import pandas as pd
-
+import re
+from urllib.parse import urljoin
 
 nest_asyncio.apply()
 
@@ -17,437 +20,686 @@ nest_asyncio.apply()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# === Telegram Setup ===
-bot_token = '8089007262:AAFgApsN7gHtzmLmfz8BAsjIUrgAbTAobKg'
-chat_id = '1974773719'
+# === Bot Configuration ===
+bot_token = '7663540460:AAFAfqA3Ur7zNUiRJ5qDWXmjIuTtcE491Gc'
+chat_id = '6151799236'
 bot = Bot(token=bot_token)
-alpha_api_key = 'S4WZ2N6CVAS82RJG'
 
+# List of authorized user IDs
+AUTHORIZED_USERS = [6151799236]  # Add more user IDs as needed
 
-# List of authorized user IDs (add your Telegram user ID here)
-AUTHORIZED_USERS = [1974773719]  # Replace with your actual Telegram user ID
-
-# === Manual RSI Calculation ===
-def calculate_rsi_manually(prices, window=14):
-    """Calculate RSI manually as fallback if ta library fails"""
-    try:
-        # Convert to numpy array for calculations
-        prices_array = np.array(prices)
+# === NSE Website Scraper ===
+class NSEScraper:
+    def __init__(self):
+        self.base_url = "https://www.nseindia.com"
+        self.session = requests.Session()
         
-        # Calculate price changes
-        deltas = np.diff(prices_array)
+        # Headers to mimic a real browser
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        self.session.headers.update(self.headers)
         
-        # Create seed values
-        seed = deltas[:window+1]
-        up = seed[seed >= 0].sum()/window
-        down = -seed[seed < 0].sum()/window
-        
-        # Calculate RS values
-        rs = up/down
-        
-        # Calculate RSI
-        rsi = np.zeros_like(prices_array)
-        rsi[:window] = 100. - 100./(1. + rs)
-        
-        # Calculate RSI for remaining prices
-        for i in range(window, len(prices_array)):
-            delta = deltas[i-1]
-            
-            if delta > 0:
-                upval = delta
-                downval = 0
-            else:
-                upval = 0
-                downval = -delta
-                
-            up = (up * (window-1) + upval) / window
-            down = (down * (window-1) + downval) / window
-            
-            rs = up/down if down != 0 else 100  # Avoid division by zero
-            rsi[i] = 100. - 100./(1. + rs)
-            
-        return rsi
-    except Exception as e:
-        logger.error(f"Error in manual RSI calculation: {str(e)}")
-        return np.ones(len(prices)) * 50  # Return neutral values on error
-
-# === Manual MACD Calculation ===
-def calculate_macd_manually(prices, fast=12, slow=26, signal=9):
-    """Calculate MACD manually as fallback if ta library fails"""
-    try:
-        # Convert to numpy array
-        prices_array = np.array(prices)
-        
-        # Calculate EMAs
-        ema_fast = np.zeros_like(prices_array)
-        ema_slow = np.zeros_like(prices_array)
-        macd_line = np.zeros_like(prices_array)
-        signal_line = np.zeros_like(prices_array)
-        
-        # Initialize with simple moving average
-        ema_fast[:fast] = np.mean(prices_array[:fast])
-        ema_slow[:slow] = np.mean(prices_array[:slow])
-        
-        # EMA factors
-        k_fast = 2.0 / (fast + 1)
-        k_slow = 2.0 / (slow + 1)
-        k_signal = 2.0 / (signal + 1)
-        
-        # Calculate EMAs
-        for i in range(fast, len(prices_array)):
-            ema_fast[i] = (prices_array[i] - ema_fast[i-1]) * k_fast + ema_fast[i-1]
-        
-        for i in range(slow, len(prices_array)):
-            ema_slow[i] = (prices_array[i] - ema_slow[i-1]) * k_slow + ema_slow[i-1]
-            macd_line[i] = ema_fast[i] - ema_slow[i]
-        
-        # Calculate signal line
-        signal_line[slow:slow+signal] = np.mean(macd_line[slow:slow+signal])
-        for i in range(slow+signal, len(prices_array)):
-            signal_line[i] = (macd_line[i] - signal_line[i-1]) * k_signal + signal_line[i-1]
-        
-        return macd_line, signal_line
-    except Exception as e:
-        logger.error(f"Error in manual MACD calculation: {str(e)}")
-        # Return neutral values on error
-        return np.zeros(len(prices)), np.zeros(len(prices))
+        # Initialize session with NSE
+        self._init_session()
     
-# === NIFTY50 Data Fetch with retry ===
-def fetch_nifty50_data(max_retries=3, ticker="^NSEI"):
-    """Fetch NIFTY50 data with retry mechanism"""
-    for attempt in range(max_retries):
+    def _init_session(self):
+        """Initialize session by visiting NSE homepage first"""
         try:
-            logger.info(f"Fetching data for {ticker}, attempt {attempt+1}/{max_retries}")
-            # Explicitly set auto_adjust to handle the warning
-            data = yf.download(tickers=ticker, period="1d", interval="15m", auto_adjust=True)
+            response = self.session.get(self.base_url, timeout=10)
+            logger.info("NSE session initialized successfully")
             
-            # Check if data is empty
-            if data.empty:
-                logger.warning(f"Attempt {attempt+1}: Empty data returned for {ticker}")
-                if attempt < max_retries - 1:
-                    time.sleep(5)  # Wait before retrying
-                    continue
-                # Try alternative ticker as fallback
-                logger.info("Trying alternative ticker 'NSEI.NS'")
-                data = yf.download(tickers="NSEI.NS", period="1d", interval="15m", auto_adjust=True)
-                if not data.empty:
-                    return data
-                
-                # If still empty, try another alternative
-                logger.info("Trying alternative ticker 'NIFTY_50.NS'")
-                data = yf.download(tickers="NIFTY_50.NS", period="1d", interval="15m", auto_adjust=True)
-                if not data.empty:
-                    return data
-                
-                # Create a minimal dummy dataframe as last resort
-                logger.warning("No data fetched, using dummy data")
-                return create_dummy_data()
-            
-            return data
+            # Get cookies from initial request
+            cookies = response.cookies
+            logger.info(f"Received {len(cookies)} cookies from NSE")
             
         except Exception as e:
-            logger.error(f"Error fetching data, attempt {attempt+1}: {str(e)}")
-            if attempt < max_retries - 1:
-                time.sleep(5)  # Wait before retrying
+            logger.error(f"Failed to initialize NSE session: {str(e)}")
+    
+    def get_nifty_data(self, index_type="50"):
+        """Scrape NIFTY data from NSE website"""
+        try:
+            if index_type == "50":
+                # NIFTY 50 data endpoint
+                url = f"{self.base_url}/api/allIndices"
             else:
-                logger.error("Max retries exceeded, using dummy data")
-                return create_dummy_data()
+                # For NIFTY 100, we'll use the broad market indices endpoint
+                url = f"{self.base_url}/api/allIndices"
+            
+            logger.info(f"Fetching NIFTY {index_type} data from: {url}")
+            
+            # Make request with retry mechanism
+            for attempt in range(3):
+                try:
+                    response = self.session.get(url, timeout=15)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        # Find NIFTY data in response
+                        nifty_data = None
+                        target_name = "NIFTY 50" if index_type == "50" else "NIFTY 100"
+                        
+                        if 'data' in data:
+                            for item in data['data']:
+                                if item.get('index', '').upper() == target_name:
+                                    nifty_data = item
+                                    break
+                        
+                        if nifty_data:
+                            return self._parse_nifty_data(nifty_data, index_type)
+                        else:
+                            logger.warning(f"NIFTY {index_type} data not found in API response")
+                    
+                    elif response.status_code == 403:
+                        logger.warning("Access forbidden, reinitializing session...")
+                        self._init_session()
+                        time.sleep(2)
+                        continue
+                    
+                    else:
+                        logger.warning(f"HTTP {response.status_code} received from NSE")
+                
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"Request failed (attempt {attempt + 1}): {str(e)}")
+                    if attempt < 2:
+                        time.sleep(3)
+                        continue
+            
+            # Fallback to alternative scraping method
+            return self._scrape_nifty_alternative(index_type)
+            
+        except Exception as e:
+            logger.error(f"Error fetching NIFTY {index_type} data: {str(e)}")
+            return None
+    
+    def _parse_nifty_data(self, data, index_type):
+        """Parse NIFTY data from NSE API response"""
+        try:
+            parsed_data = {
+                'index_name': data.get('index', f'NIFTY {index_type}'),
+                'last_price': float(data.get('last', 0)),
+                'change': float(data.get('variation', 0)),
+                'percent_change': float(data.get('percentChange', 0)),
+                'open': float(data.get('open', 0)),
+                'high': float(data.get('dayHigh', 0)),
+                'low': float(data.get('dayLow', 0)),
+                'previous_close': float(data.get('previousClose', 0)),
+                'timestamp': data.get('timeVal', ''),
+                'market_status': 'Open' if data.get('last', 0) > 0 else 'Closed'
+            }
+            
+            logger.info(f"Successfully parsed NIFTY {index_type} data: ₹{parsed_data['last_price']}")
+            return parsed_data
+            
+        except Exception as e:
+            logger.error(f"Error parsing NIFTY data: {str(e)}")
+            return None
+    
+    def _scrape_nifty_alternative(self, index_type):
+        """Alternative scraping method using NSE webpage"""
+        try:
+            logger.info(f"Trying alternative scraping for NIFTY {index_type}")
+            
+            # Direct URL for NIFTY page
+            if index_type == "50":
+                url = f"{self.base_url}/market-data/live-equity-market?symbol=NIFTY%2050"
+            else:
+                url = f"{self.base_url}/market-data/live-equity-market?symbol=NIFTY%20100"
+            
+            response = self.session.get(url, timeout=15)
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Try to extract data from the webpage
+                price_data = self._extract_price_from_html(soup, index_type)
+                if price_data:
+                    return price_data
+            
+            # Last resort - try to get data from market summary
+            return self._get_market_summary_data(index_type)
+            
+        except Exception as e:
+            logger.error(f"Alternative scraping failed: {str(e)}")
+            return None
+    
+    def _extract_price_from_html(self, soup, index_type):
+        """Extract price data from HTML content"""
+        try:
+            # Look for common patterns in NSE website
+            price_elements = soup.find_all(['span', 'div'], class_=re.compile(r'price|value|last', re.I))
+            
+            # This is a simplified extraction - NSE website structure changes frequently
+            # You might need to update these selectors based on current website structure
+            
+            extracted_data = {
+                'index_name': f'NIFTY {index_type}',
+                'last_price': 0.0,
+                'change': 0.0,
+                'percent_change': 0.0,
+                'open': 0.0,
+                'high': 0.0,
+                'low': 0.0,
+                'previous_close': 0.0,
+                'timestamp': datetime.now().strftime('%H:%M:%S'),
+                'market_status': 'Unknown'
+            }
+            
+            # Try to find numerical values that look like stock prices
+            numbers = re.findall(r'\d{4,5}\.\d{2}', soup.get_text())
+            if numbers:
+                # Assume first large number is the current price
+                extracted_data['last_price'] = float(numbers[0])
+                logger.info(f"Extracted price from HTML: ₹{extracted_data['last_price']}")
+                return extracted_data
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"HTML extraction failed: {str(e)}")
+            return None
+    
+    def _get_market_summary_data(self, index_type):
+        """Get basic market data as last resort"""
+        try:
+            logger.info("Attempting to get basic market summary")
+            
+            # Try market data API endpoint
+            url = f"{self.base_url}/api/market-data-pre-open?key=ALL"
+            response = self.session.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                # Process market summary data here
+                # This would need to be customized based on actual API response structure
+                pass
+            
+            # Return basic placeholder data if nothing else works
+            return {
+                'index_name': f'NIFTY {index_type}',
+                'last_price': 0.0,
+                'change': 0.0,
+                'percent_change': 0.0,
+                'open': 0.0,
+                'high': 0.0,
+                'low': 0.0,
+                'previous_close': 0.0,
+                'timestamp': datetime.now().strftime('%H:%M:%S'),
+                'market_status': 'Data Unavailable',
+                'error': True
+            }
+            
+        except Exception as e:
+            logger.error(f"Market summary fallback failed: {str(e)}")
+            return None
+    
+    def get_historical_data(self, index_type="50", days=7):
+        """Attempt to get historical data for technical analysis"""
+        try:
+            logger.info(f"Fetching historical data for NIFTY {index_type}")
+            
+            # NSE historical data is typically not easily accessible via scraping
+            # This is a simplified approach - you might need NSE historical data APIs
+            
+            # For now, return None to indicate historical data is not available
+            # You could implement this by scraping historical charts or using other methods
+            logger.warning("Historical data scraping not implemented - technical analysis will be limited")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Historical data fetch failed: {str(e)}")
+            return None
 
-def create_dummy_data():
-    """Create dummy data as fallback to prevent calculation errors"""
-    logger.warning("Creating dummy data for fallback")
-    index = pd.date_range(start=pd.Timestamp.now().floor('D'), periods=10, freq='15min')
-    data = {
-        'Open': [17000 + i for i in range(10)],
-        'High': [17010 + i for i in range(10)],
-        'Low': [16990 + i for i in range(10)],
-        'Close': [17005 + i for i in range(10)],
-        'Volume': [1000000 for _ in range(10)]
-    }
-    return pd.DataFrame(data, index=index)
+# Initialize NSE scraper
+nse_scraper = NSEScraper()
 
-# === Indicator Calculation ===
-def analyze_indicators(df):
-    """Calculate technical indicators on the dataframe"""
+# === Technical Analysis (Simplified without historical data) ===
+def analyze_current_data(price_data):
+    """Analyze current price data without historical indicators"""
     try:
-        # Check if dataframe is not empty before calculating indicators
-        if not df.empty and len(df) > 14:  # Need at least 14 periods for RSI
-            # Convert the Close column to a simple 1D series
-            # The .squeeze() method will convert (25,1) shape to (25,) shape
-            close_series = df['Close'].squeeze()
-            
-            # Make sure it's a Series, not a DataFrame
-            if isinstance(close_series, pd.DataFrame):
-                close_series = close_series.iloc[:, 0]
-            
-            # Ensure it's a flat Series with no multi-dimensional structure
-            logger.info(f"Close series shape after squeeze: {close_series.shape if hasattr(close_series, 'shape') else 'scalar'}")
-            
-            # Calculate RSI with the simple 1D series
-            rsi_indicator = ta.momentum.RSIIndicator(close_series, window=14)
-            df['RSI'] = rsi_indicator.rsi()
-            
-            # Calculate MACD with the simple 1D series
-            macd = ta.trend.MACD(close_series)
-            df['MACD'] = macd.macd()
-            df['Signal'] = macd.macd_signal()
-        else:
-            logger.warning("Not enough data for indicators, using placeholder values")
-            df['RSI'] = 50.0  # Neutral RSI value
-            df['MACD'] = 0.0
-            df['Signal'] = 0.0
-        return df
-    except Exception as e:
-        logger.error(f"Error calculating indicators: {str(e)}")
-        # Add placeholder columns to avoid downstream errors
-        df['RSI'] = 50.0
-        df['MACD'] = 0.0
-        df['Signal'] = 0.0
-        return df
-
-# === Candlestick Pattern Detection ===
-def detect_candlestick(df):
-    """Detect candlestick pattern from the latest candle"""
-    try:
-        latest = df.iloc[-1].copy()  # Get a copy of the latest row
+        if not price_data or price_data.get('error'):
+            return None
         
-        # Extract scalar values from Series using iloc[0] to avoid FutureWarning
-        open_price = float(latest['Open'].iloc[0]) if isinstance(latest['Open'], pd.Series) else float(latest['Open'])
-        close_price = float(latest['Close'].iloc[0]) if isinstance(latest['Close'], pd.Series) else float(latest['Close'])
-        high = float(latest['High'].iloc[0]) if isinstance(latest['High'], pd.Series) else float(latest['High'])
-        low = float(latest['Low'].iloc[0]) if isinstance(latest['Low'], pd.Series) else float(latest['Low'])
-
-        body = abs(close_price - open_price)
-        candle_range = high - low
-        upper_shadow = high - max(open_price, close_price)
-        lower_shadow = min(open_price, close_price) - low
-
-        pattern = "No clear pattern"
-        if close_price > open_price and body > upper_shadow and body > lower_shadow:
-            pattern = "Bullish Engulfing"
-        elif open_price > close_price and body > upper_shadow and body > lower_shadow:
-            pattern = "Bearish Engulfing"
-        elif body < candle_range * 0.1:
-            pattern = "Doji"
-        elif lower_shadow > 2 * body:
-            pattern = "Hammer"
-        elif upper_shadow > 2 * body:
-            pattern = "Shooting Star"
-
-        return pattern
-    except Exception as e:
-        logger.error(f"Error detecting candlestick pattern: {str(e)}")
-        return "Unable to determine pattern"
-
-# === Suggestion Generator ===
-def get_suggestion(rsi_value, macd, signal):
-    """Generate trading suggestions based on technical indicators"""
-    try:
-        # Convert Series to float if needed using iloc[0] to avoid FutureWarning
-        if isinstance(rsi_value, pd.Series):
-            rsi_value = float(rsi_value.iloc[0])
-        if isinstance(macd, pd.Series):
-            macd = float(macd.iloc[0])
-        if isinstance(signal, pd.Series):
-            signal = float(signal.iloc[0])
-            
-        # Ensure we're working with scalar values
-        rsi_value = float(rsi_value)
-        macd = float(macd)
-        signal = float(signal)
-
-        if rsi_value > 70:
-            rsi_trend = "Overbought, possible reversal soon"
-        elif rsi_value < 30:
-            rsi_trend = "Oversold, possible bounce"
+        analysis = {
+            'current_price': price_data['last_price'],
+            'change': price_data['change'],
+            'percent_change': price_data['percent_change'],
+            'day_range': f"₹{price_data['low']} - ₹{price_data['high']}",
+            'opening_gap': price_data['last_price'] - price_data['open'] if price_data['open'] > 0 else 0,
+            'market_sentiment': 'Bullish' if price_data['change'] > 0 else 'Bearish' if price_data['change'] < 0 else 'Neutral'
+        }
+        
+        # Simple momentum analysis
+        if abs(price_data['percent_change']) > 1.0:
+            analysis['momentum'] = 'Strong'
+        elif abs(price_data['percent_change']) > 0.5:
+            analysis['momentum'] = 'Moderate'
         else:
-            rsi_trend = "Normal range"
-
-        macd_signal = "Bullish" if macd > signal else "Bearish"
-
-        if macd_signal == "Bullish" and rsi_value < 70:
-            suggestion = "Possible Uptrend"
-        elif macd_signal == "Bearish" and rsi_value > 30:
-            suggestion = "Possible Downtrend"
+            analysis['momentum'] = 'Weak'
+        
+        # Price position analysis
+        if price_data['high'] > 0 and price_data['low'] > 0:
+            price_position = (price_data['last_price'] - price_data['low']) / (price_data['high'] - price_data['low'])
+            if price_position > 0.7:
+                analysis['position'] = 'Near Day High'
+            elif price_position < 0.3:
+                analysis['position'] = 'Near Day Low'
+            else:
+                analysis['position'] = 'Mid Range'
         else:
-            suggestion = "Neutral / Wait and watch"
-
-        return rsi_trend, macd_signal, suggestion
+            analysis['position'] = 'Unknown'
+        
+        return analysis
+        
     except Exception as e:
-        logger.error(f"Error generating suggestion: {str(e)}")
-        return "Normal range", "Neutral", "Wait and watch"
+        logger.error(f"Error in current data analysis: {str(e)}")
+        return None
 
-# === Send Telegram Message (Async) ===
-async def send_telegram_message(text, user_id=None):
-    """Send message to Telegram asynchronously"""
+# === Market Prediction (Simplified) ===
+def generate_simple_prediction(price_data, analysis):
+    """Generate prediction based on available data"""
     try:
-        # If user_id is provided, send to that user, otherwise use default chat_id
-        recipient = user_id if user_id else chat_id
-        await bot.send_message(chat_id=recipient, text=text, parse_mode='markdown')
-        logger.info(f"Message sent successfully to {recipient}")
+        if not price_data or not analysis:
+            return "Insufficient data for prediction", "Neutral"
+        
+        prediction_score = 0
+        signals = []
+        
+        # Price change analysis
+        if price_data['percent_change'] > 1.0:
+            prediction_score += 2
+            signals.append("Strong upward momentum")
+        elif price_data['percent_change'] > 0.5:
+            prediction_score += 1
+            signals.append("Positive momentum")
+        elif price_data['percent_change'] < -1.0:
+            prediction_score -= 2
+            signals.append("Strong downward pressure")
+        elif price_data['percent_change'] < -0.5:
+            prediction_score -= 1
+            signals.append("Negative momentum")
+        
+        # Opening gap analysis
+        opening_gap = analysis.get('opening_gap', 0)
+        if opening_gap > 50:
+            prediction_score += 1
+            signals.append("Positive opening gap")
+        elif opening_gap < -50:
+            prediction_score -= 1
+            signals.append("Negative opening gap")
+        
+        # Position in day's range
+        if analysis.get('position') == 'Near Day High':
+            prediction_score += 1
+            signals.append("Trading near day high")
+        elif analysis.get('position') == 'Near Day Low':
+            prediction_score -= 1
+            signals.append("Trading near day low")
+        
+        # Generate final prediction
+        if prediction_score >= 2:
+            prediction = "Bullish (70% confidence)"
+        elif prediction_score >= 1:
+            prediction = "Mildly Bullish (60% confidence)"
+        elif prediction_score <= -2:
+            prediction = "Bearish (70% confidence)"
+        elif prediction_score <= -1:
+            prediction = "Mildly Bearish (60% confidence)"
+        else:
+            prediction = "Neutral (50% confidence)"
+        
+        detailed_analysis = "Signals: " + " | ".join(signals[:3]) if signals else "Limited signals available"
+        
+        return detailed_analysis, prediction
+        
     except Exception as e:
-        logger.error(f"Failed to send Telegram message: {str(e)}")
+        logger.error(f"Error generating prediction: {str(e)}")
+        return "Prediction analysis failed", "Neutral"
 
 # === Authorization Check ===
 def is_authorized(user_id):
     """Check if the user is authorized to use this bot"""
     return int(user_id) in AUTHORIZED_USERS
 
-# === Command Handler for the /nifty command ===
-async def nifty_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /nifty command for authenticated users"""
-    user_id = update.effective_user.id
-    
-    if not is_authorized(user_id):
-        await update.message.reply_text("You are not authorized to use this bot.")
-        logger.warning(f"Unauthorized access attempt from user {user_id}")
-        return
-    
-    await update.message.reply_text("Fetching NIFTY50 data, please wait...")
-    await run_bot_for_user(user_id)
-
-# === Help command handler ===
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /help command"""
-    user_id = update.effective_user.id
-    
-    if not is_authorized(user_id):
-        await update.message.reply_text("You are not authorized to use this bot.")
-        logger.warning(f"Unauthorized access attempt from user {user_id}")
-        return
-    
-    help_text = """
-*NIFTY50 Trading Bot Commands:*
-
-/nifty - Get the latest NIFTY50 analysis
-/help - Show this help message
-    """
-    await update.message.reply_text(help_text, parse_mode='markdown')
-
-# === Start command handler ===
+# === Command Handlers ===
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /start command"""
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
     
     if not is_authorized(user_id):
-        await update.message.reply_text("You are not authorized to use this bot.")
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
         logger.warning(f"Unauthorized access attempt from user {user_id} ({username})")
         return
     
     welcome_text = f"""
-Hello {username}!
+🚀 *Welcome {username}!*
 
-Welcome to the NIFTY50 Trading Bot. This bot provides technical analysis for NIFTY50.
+*NIFTY Trading Analysis Bot*
+📊 *Direct NSE Data Scraping*
 
-Use /nifty to get the latest analysis.
-Use /help to see all available commands.
+📈 Available Commands:
+• `/nifty50` - Get NIFTY 50 analysis
+• `/nifty100` - Get NIFTY 100 analysis  
+• `/quick50` - Quick NIFTY 50 quote
+• `/quick100` - Quick NIFTY 100 quote
+• `/predict50` - NIFTY 50 prediction
+• `/predict100` - NIFTY 100 prediction
+• `/status` - Check scraper status
+• `/help` - Show help menu
+
+💡 *Data Source:* NSE India Website
+⚡ *Real-time scraping* from official NSE
     """
-    await update.message.reply_text(welcome_text)
+    await update.message.reply_text(welcome_text, parse_mode='markdown')
     logger.info(f"User {user_id} ({username}) started the bot")
 
-# === Modified Bot Logic to respond to a specific user ===
-async def run_bot_for_user(user_id=None):
-    """Async version of the main bot function that can target a specific user"""
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /help command"""
+    user_id = update.effective_user.id
+    
+    if not is_authorized(user_id):
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+    
+    help_text = """
+📚 *NIFTY Trading Bot - Command Guide*
+
+*Main Analysis Commands:*
+• `/nifty50` - Complete NIFTY 50 analysis
+• `/nifty100` - Complete NIFTY 100 analysis
+
+*Quick Commands:*
+• `/quick50` - Fast NIFTY 50 price update
+• `/quick100` - Fast NIFTY 100 price update
+
+*Prediction Commands:*
+• `/predict50` - Market prediction for NIFTY 50
+• `/predict100` - Market prediction for NIFTY 100
+
+*Utility Commands:*
+• `/status` - Check NSE scraper status
+• `/help` - Show this help menu
+• `/start` - Restart the bot
+
+📊 *Features:*
+• Direct NSE website scraping
+• Real-time price data
+• Market sentiment analysis
+• Intraday predictions
+• Price position analysis
+
+🌐 *Data Source:* NSE India Official Website
+⚠️ *Note:* Historical technical indicators require NSE historical data access
+    """
+    await update.message.reply_text(help_text, parse_mode='markdown')
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check NSE scraper status"""
+    user_id = update.effective_user.id
+    
+    if not is_authorized(user_id):
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+    
+    await update.message.reply_text("🔍 Checking NSE scraper status...")
+    
+    status_msg = "📊 *NSE Scraper Status Report*\n\n"
+    
+    # Test NSE connection
     try:
-        logger.info(f"Starting NIFTY50 signal update for user {user_id if user_id else 'default'}")
-        df = fetch_nifty50_data()
+        test_data = nse_scraper.get_nifty_data("50")
+        if test_data and not test_data.get('error'):
+            status_msg += "✅ NSE Website: *Accessible*\n"
+            status_msg += f"✅ NIFTY 50 Data: *Available* (₹{test_data['last_price']:.2f})\n"
+        else:
+            status_msg += "⚠️ NSE Website: *Limited Access*\n"
+    except Exception as e:
+        status_msg += "❌ NSE Website: *Connection Issues*\n"
+        status_msg += f"Error: {str(e)[:50]}...\n"
+    
+    status_msg += f"\n🤖 Bot Status: *Active*\n"
+    status_msg += f"👤 Authorized Users: *{len(AUTHORIZED_USERS)}*\n"
+    status_msg += f"🕐 Last Check: *{datetime.now().strftime('%H:%M:%S')}*\n"
+    status_msg += f"📡 Data Source: *NSE India Website*"
+    
+    await update.message.reply_text(status_msg, parse_mode='markdown')
+
+async def quick_nifty_command(update: Update, context: ContextTypes.DEFAULT_TYPE, index_type="50"):
+    """Quick NIFTY price update"""
+    user_id = update.effective_user.id
+    
+    if not is_authorized(user_id):
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+    
+    await update.message.reply_text(f"⚡ Scraping NIFTY {index_type} from NSE...")
+    
+    try:
+        price_data = nse_scraper.get_nifty_data(index_type)
         
-        # Log data shape to diagnose issues
-        logger.info(f"Data fetched: {df.shape[0]} rows x {df.shape[1]} columns")
-        
-        # Early return if still no data
-        if df.empty:
-            error_msg = "Unable to retrieve market data. Service temporarily unavailable."
-            logger.error(error_msg)
-            await send_telegram_message(error_msg, user_id)
-            return
+        if price_data and not price_data.get('error'):
+            change_emoji = "📈" if price_data['change'] > 0 else "📉" if price_data['change'] < 0 else "➖"
             
-        df = analyze_indicators(df)
+            msg = f"""
+{change_emoji} *NIFTY {index_type} - Live from NSE*
 
-        latest = df.iloc[-1]
+💰 *Current Price:* ₹{price_data['last_price']:.2f}
+📊 *Change:* {price_data['change']:+.2f} ({price_data['percent_change']:+.2f}%)
+📈 *High:* ₹{price_data['high']:.2f}
+📉 *Low:* ₹{price_data['low']:.2f}
+🔓 *Open:* ₹{price_data['open']:.2f}
+🔒 *Previous Close:* ₹{price_data['previous_close']:.2f}
+
+📊 *Market Status:* {price_data['market_status']}
+🕐 *Updated:* {price_data['timestamp']}
+📡 *Source:* NSE India Website
+            """
+        else:
+            msg = f"❌ Unable to fetch NIFTY {index_type} data from NSE website. The website may be temporarily inaccessible or the structure may have changed."
         
-        # Extract scalar values from Series using iloc[0] to avoid FutureWarning
-        price = float(latest['Close'].iloc[0]) if isinstance(latest['Close'], pd.Series) else float(latest['Close'])
-        rsi_val = float(latest['RSI'].iloc[0]) if isinstance(latest['RSI'], pd.Series) else float(latest['RSI'])
-        macd_val = float(latest['MACD'].iloc[0]) if isinstance(latest['MACD'], pd.Series) else float(latest['MACD'])
-        signal_val = float(latest['Signal'].iloc[0]) if isinstance(latest['Signal'], pd.Series) else float(latest['Signal'])
-        
-        candle = detect_candlestick(df)
-        rsi_trend, macd_signal, suggestion = get_suggestion(rsi_val, macd_val, signal_val)
-
-        msg = f"""*NIFTY50 Signal Update:*
-
-Price: ₹{price:.2f}
-
-RSI: {rsi_val:.2f} ({rsi_trend})
-
-MACD: {macd_signal} crossover detected
-
-Candlestick Pattern: {candle}
-
-Market Behaviour: {suggestion}
-"""
-        logger.info("Sending message to Telegram")
-        await send_telegram_message(msg, user_id)
+        await update.message.reply_text(msg, parse_mode='markdown')
         
     except Exception as e:
-        error_msg = f"An error occurred: {str(e)}"
-        logger.error(error_msg)
+        logger.error(f"Error in quick NIFTY {index_type} command: {str(e)}")
+        await update.message.reply_text(f"❌ Error scraping NIFTY {index_type} data: NSE website may be down or blocking requests.")
+
+async def nifty_analysis_command(update: Update, context: ContextTypes.DEFAULT_TYPE, index_type="50"):
+    """Complete NIFTY analysis"""
+    user_id = update.effective_user.id
+    
+    if not is_authorized(user_id):
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+    
+    await update.message.reply_text(f"📊 Analyzing NIFTY {index_type} from NSE website...")
+    
+    try:
+        price_data = nse_scraper.get_nifty_data(index_type)
+        
+        if not price_data or price_data.get('error'):
+            await update.message.reply_text(f"❌ Unable to fetch NIFTY {index_type} data from NSE website. Please try again later.")
+            return
+        
+        # Analyze current data
+        analysis = analyze_current_data(price_data)
+        
+        if not analysis:
+            await update.message.reply_text(f"❌ Analysis failed for NIFTY {index_type}.")
+            return
+        
+        change_emoji = "📈" if price_data['change'] > 0 else "📉" if price_data['change'] < 0 else "➖"
+        
+        # Format message
+        msg = f"""
+{change_emoji} *NIFTY {index_type} - Complete Analysis*
+
+💰 *Price:* ₹{analysis['current_price']:.2f}
+📊 *Change:* {analysis['change']:+.2f} ({analysis['percent_change']:+.2f}%)
+
+📊 *Market Analysis:*
+• Sentiment: {analysis['market_sentiment']}
+• Momentum: {analysis['momentum']}
+• Position: {analysis['position']}
+• Day Range: {analysis['day_range']}
+• Opening Gap: ₹{analysis['opening_gap']:+.2f}
+
+📊 *Market Status:* {price_data['market_status']}
+
+⚠️ *Note:* Analysis based on current session data
+Historical indicators require NSE historical data access
+
+📡 *Data Source:* NSE India Website
+🕐 *Time:* {datetime.now().strftime('%H:%M:%S')}
+        """
+        
+        await update.message.reply_text(msg, parse_mode='markdown')
+        
+    except Exception as e:
+        logger.error(f"Error in NIFTY {index_type} analysis: {str(e)}")
+        await update.message.reply_text(f"❌ Analysis failed for NIFTY {index_type}: NSE website may be inaccessible.")
+
+async def prediction_command(update: Update, context: ContextTypes.DEFAULT_TYPE, index_type="50"):
+    """Generate prediction for NIFTY"""
+    user_id = update.effective_user.id
+    
+    if not is_authorized(user_id):
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+    
+    await update.message.reply_text(f"🔮 Generating NIFTY {index_type} prediction from NSE data...")
+    
+    try:
+        price_data = nse_scraper.get_nifty_data(index_type)
+        
+        if not price_data or price_data.get('error'):
+            await update.message.reply_text(f"❌ Cannot generate prediction - no data available for NIFTY {index_type}.")
+            return
+        
+        analysis = analyze_current_data(price_data)
+        if not analysis:
+            await update.message.reply_text(f"❌ Prediction analysis failed for NIFTY {index_type}.")
+            return
+        
+        detailed_analysis, prediction = generate_simple_prediction(price_data, analysis)
+        
+        msg = f"""
+🔮 *NIFTY {index_type} - Market Prediction*
+
+🎯 *Outlook:* {prediction}
+
+📊 *Analysis:*
+{detailed_analysis}
+
+📈 *Current Factors:*
+• Price Momentum: {analysis['momentum']}
+• Market Sentiment: {analysis['market_sentiment']}
+• Intraday Position: {analysis['position']}
+
+⚠️ *Disclaimer:* Prediction based on current session data only. 
+Not financial advice. Always do your own research.
+
+📡 *Data Source:* NSE India Website
+🕐 *Generated:* {datetime.now().strftime('%H:%M:%S')}
+        """
+        
+        await update.message.reply_text(msg, parse_mode='markdown')
+        
+    except Exception as e:
+        logger.error(f"Error in NIFTY {index_type} prediction: {str(e)}")
+        await update.message.reply_text(f"❌ Prediction failed for NIFTY {index_type}: NSE data unavailable.")
+
+# === Command wrapper functions ===
+async def nifty50_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await nifty_analysis_command(update, context, "50")
+
+async def nifty100_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await nifty_analysis_command(update, context, "100")
+
+async def quick50_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await quick_nifty_command(update, context, "50")
+
+async def quick100_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await quick_nifty_command(update, context, "100")
+
+async def predict50_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await prediction_command(update, context, "50")
+
+async def predict100_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await prediction_command(update, context, "100")
+
+# === Error Handler ===
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log errors and notify user"""
+    logger.error(f"Update {update} caused error: {context.error}")
+    
+    if update and hasattr(update, 'effective_user'):
         try:
-            await send_telegram_message(error_msg, user_id)
-        except Exception as telegram_error:
-            logger.error(f"Failed to send error message to Telegram: {str(telegram_error)}")
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text="❌ An unexpected error occurred. NSE website may be temporarily inaccessible."
+            )
+        except:
+            pass
 
-# === Schedule function ===
-async def scheduled_update():
-    """Send scheduled updates to all authorized users"""
-    for user_id in AUTHORIZED_USERS:
-        await run_bot_for_user(user_id)
+# === Unauthorized Handler ===
+async def unauthorized_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle messages from unauthorized users"""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text("❌ You are not authorized to use this bot.")
+        logger.warning(f"Unauthorized access attempt from user {user_id}")
 
-# === Set up the interactive bot ===
+# === Main Bot Setup ===
 async def main():
-    """Set up the Telegram bot with command handlers using the newer API"""
+    """Set up the Telegram bot with NSE scraping"""
     # Create the Application
     application = Application.builder().token(bot_token).build()
     
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("nifty", nifty_command))
-
-    # Optional: Catch-all message handler for unauthorized users
-    async def unauthorized_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        if not is_authorized(user_id):
-            await update.message.reply_text("You are not authorized to use this bot.")
-            logger.warning(f"Unauthorized access attempt from user {user_id}")
-
-    application.add_handler(MessageHandler(filters.COMMAND, unauthorized_handler))
-
+    application.add_handler(CommandHandler("status", status_command))
+    
+    # NIFTY analysis commands
+    application.add_handler(CommandHandler("nifty50", nifty50_command))
+    application.add_handler(CommandHandler("nifty100", nifty100_command))
+    
+    # Quick update commands  
+    application.add_handler(CommandHandler("quick50", quick50_command))
+    application.add_handler(CommandHandler("quick100", quick100_command))
+    
+    # Prediction commands
+    application.add_handler(CommandHandler("predict50", predict50_command))
+    application.add_handler(CommandHandler("predict100", predict100_command))
+    
+    # Backward compatibility
+    application.add_handler(CommandHandler("nifty", nifty50_command))
+    
+    # Unauthorized access handler
+    application.add_handler(MessageHandler(filters.ALL, unauthorized_handler))
+    
     # Error handler
-    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-        logger.error(f"Update {update} caused error: {context.error}")
     application.add_error_handler(error_handler)
 
     # Start polling
-    logger.info("Bot started and polling for messages")
+    logger.info("🚀 NSE Scraping Bot started and polling for messages")
+    print("NSE Scraping Bot is running... Press Ctrl+C to stop")
     await application.run_polling()
 
-# === Original method for backward compatibility ===
-async def run_bot_async():
-    """Async version of the main bot function (original method)"""
-    await run_bot_for_user()
-
-def run_bot():
-    """Main function to run the trading bot"""
-    asyncio.run(run_bot_async())
-
-# === RUN THE BOT ===
+# === Run the Bot ===
 if __name__ == "__main__":
-    # Choose which method to use based on your needs
-    # For scheduled updates, use run_bot()
-    # For interactive command-based bot, use asyncio.run(main())
-    asyncio.run(main())
-  # Run the interactive bot
-    # run_bot()  # Uncomment this and comment out main() if you want to run the original scheduled method instead
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+        print("\n🛑 Bot stopped gracefully")
+    except Exception as e:
+        logger.error(f"Fatal error: {str(e)}")
+        print(f"❌ Bot crashed: {str(e)}")
