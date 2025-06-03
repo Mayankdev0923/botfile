@@ -20,6 +20,7 @@ from selenium.webdriver.common.by import By
 import shutil
 
 nest_asyncio.apply()
+proxy = "103.94.5.210:8080"
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -65,6 +66,7 @@ class NSEScraper:
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_argument("--window-size=1920,1080")
+            chrome_options.add_argument(f'--proxy-server=http://{proxy}')
 
             # Check chromedriver availability
             chromedriver_path = shutil.which("chromedriver")
